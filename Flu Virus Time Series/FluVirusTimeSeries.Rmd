@@ -1,0 +1,448 @@
+---
+title: "CaseStudy8_Final"
+author: "Paul Huggins, Dustin Bracy, Grace Lang & Branum Stephans"
+date: "2/21/2021"
+output: html_document
+---
+
+```{r library}
+library(tswge)
+library(tidyverse)
+library(VIM)
+library(ggplot2)
+library(DataExplorer)
+library(lubridate)
+library(stringr)
+library(nnfor)
+
+```
+
+Loading in the data 
+
+data source: https://apps.who.int/flumart/Default?ReportNo=12
+  https://www.who.int/influenza/gisrs_laboratory/flunet/en/
+```{r setup, include=FALSE}
+#flu <- read_csv("/Users/michaelstephan/Desktop/SMU/spring 2021/quantifying the world/project 1/QTW_Spring2021/Unit8_CaseStudy/data/FluNetInteractiveReport_14-20.csv")
+
+flu <- read_csv("../Unit8_CaseStudy/data/FluNetInteractiveReport_14-20.csv")
+
+#Change column types to date
+##flu$SDATE <- as.Date(flu$SDATE,"%m/%d/%y")
+##flu$EDATE <- as.Date(flu$EDATE,"%m/%d/%y")
+flu$EDATE <- mdy(flu$EDATE)
+flu$SDATE <- mdy(flu$SDATE)
+
+```
+
+
+```{r missing values}
+# what are the data types of each column?
+str(flu) # everything looks correct
+
+# identity null values
+missing_graph <- aggr(flu)
+
+# plot missing
+missing_plot <- plot_missing(flu, missing_only = T)
+
+# missing list
+na_count <-sapply(flu, function(y) sum(length(which(is.na(y)))))
+na_count
+
+## We will need to investigate the implications of nulls in these fields... it might be better to leave in considering we have the complete week list and we dont want to skip weeks in data
+
+# only take rows without missing values
+#flu <- flu[complete.cases(flu),]
+```
+
+```{r}
+#aggregate data by month, so we can also model data off of the month version
+flu$Month <- month(flu$EDATE)
+flu_month <- flu %>% group_by(YearMonth = paste0(Year,'-',str_pad(Month,2,pad='0'))) %>% summarise(ALL_INF = sum(ALL_INF))
+
+
+```
+
+# Initial Review of Data
+
+Spectral density shows a peak at 0, with smaller peaks around .19, .27 & .36. Strongest peak indicates a positive phi with wandering behavior. 
+
+The ACF shows slowly diminishing lags and the realization indicates there may be seasonality with the 6 peaks in frequency. 
+```{r}
+plot(flu$ALL_INF,type = "l")
+plotts.sample.wge(flu$ALL_INF)
+
+parzen.wge(flu$ALL_INF)
+#best fit model first pass
+aic5.wge(flu$ALL_INF)
+```
+
+# Remove seasonality that might be present
+```{r}
+#Remove 52 weeks (yearly seasonality)
+Dif = artrans.wge(flu$ALL_INF,c(rep(0,51),1))
+aic5.wge(Dif)
+
+#Try every 1 month...
+Dif1= artrans.wge(flu$ALL_INF,c(rep(0,4),1))
+aic5.wge(Dif1)
+
+#Try quarterly trend
+Dif2= artrans.wge(flu$ALL_INF,c(rep(0,13),1))
+aic5.wge(Dif2)
+#Try every 6 months...
+Dif3= artrans.wge(flu$ALL_INF,c(rep(0,27),1))
+aic5.wge(Dif3)
+
+#I'm not sure, but I think removing the 52 weeks looks the best, would be open to opinions
+```
+
+
+
+# estimating model coefficients
+```{r coefficient estimation}
+estimates <- est.arma.wge(Dif, p=5, q=2)
+print(estimates)
+ggplot() + geom_line(aes(x=1:length(Dif), y=estimates$res)) + ggtitle("View of residuals") + xlab("Week") + ylab("+/- Error")
+```
+
+
+# Base forecasting
+```{r forecasting}
+#I understand this will need the proper phis & thetas, but wanted to get a look to see what it might look like
+m1 = fore.aruma.wge(flu$ALL_INF, phi=estimates$phi, theta=estimates$theta, n.ahead=52, s=52, lastn = TRUE)
+ASE1 = mean((flu$ALL_INF[341:366]-m1$f)^2)
+ASE1
+
+```
+
+
+# Now, we will try a neural net to see if we can gain any improvements 
+```{r nnfor}
+mlp1 <- mlp(ts(flu$ALL_INF))
+plot(mlp1)
+plot(forecast(mlp1, h=52))
+
+```
+
+
+# EDA on monthly data:
+
+```{r}
+# Plot the data
+plotts.sample.wge(flu_month$ALL_INF)
+
+# Look deeper at spectral density
+parzen.wge(flu_month$ALL_INF, trun=50)
+
+# Difference it once 1-B, still shows strong seasonal trend
+d1 = artrans.wge(flu_month$ALL_INF, 1)
+
+# Difference it again another 1-B, too many 1-Bs
+artrans.wge(d1, 1)
+
+# Take out 12: removes a LOT of seasonality!
+s12 = artrans.wge(flu_month$ALL_INF, c(rep(0,11),1))
+
+# Take out (1-B) + s12: unnecessary
+artrans.wge(s12,1)
+
+# Build transparent plots for PPT:
+# flu cases by year
+
+p <- ggplot(flu_month) +
+ aes(x = YearMonth, y = ALL_INF) +
+ geom_line(size = 1, group = "#37C2D1") +
+ labs(y = "Number of Flu Cases", x='') +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA)
+  )
+p
+ggsave(plot = p, file = "../QTW_Spring2021/Unit8_CaseStudy/fig/flu_category.png", 
+       bg = "transparent",
+       width = 14, height = 5, units = "cm", dpi = 800)
+#it's not saving down for me just yet.. 
+
+#Graph A vs B flu
+q <- ggplot(flu) +
+  aes(x=EDATE) + 
+  geom_line(aes(y=INF_A),color="#37C2D1") + 
+  geom_line(aes(y=INF_B),color="#4E677C") +
+  labs(y = "Number of Flu Cases", x='Year',title='Total Flu Cases by Type A or B') 
+q
+
+```
+
+
+## Factor Table Analysis: Very Strong evidence of an annual trend
+
+Here we are going to look at a factor table to see if we can identify an annual trend.
+
+The overfit table shows overwhelming evidence of a 1-B^12 trend being present in the model.  This is more than enough evidence to proceed with the 12 month seasonal model.
+```{r}
+
+# Generate a factor table for a (1-B^12)
+tswge::factor.wge(c(rep(0,11),1))
+
+# Overfit table
+est.ar.wge(flu_month$ALL_INF, p=15)
+```
+## Comparison plots: our seasonal prediction holds up pretty well against simulated time series data of similar shape
+
+```{r}
+
+# Estimate the model params
+aic5.wge(s12, type = 'aic', p=0:12,q=0:2) #2
+aic5.wge(s12, type = 'bic', p=0:12,q=0:2) #2
+e <- est.arma.wge(s12, p=2, q=0)
+
+# Ljung Box Test shows white noise residuals
+ljung.wge(artrans.wge(s12, phi.tr = e$phi))
+ljung.wge(artrans.wge(s12, phi.tr = e$phi), K = 48)
+acf(e$res)
+pacf(e$res)
+dev.off()
+
+#Compare Spectral Densities
+sims = 5
+SpecDen = parzen.wge(flu_month$ALL_INF, plot = "FALSE")
+plot(SpecDen$freq, SpecDen$pzgram, type = "l", lwd = 6)
+
+for( i in 1: sims)
+{
+   SpecDen2 = parzen.wge(gen.aruma.wge(84,s = 12, phi = e$phi, plot ="FALSE"), plot = "FALSE")
+   lines(SpecDen2$freq,SpecDen2$pzgram, lwd = 2, col = "red")
+}
+
+
+#Compare ACFs
+sims = 5
+ACF = acf(flu_month$ALL_INF, plot = "FALSE")
+plot(ACF$lag ,ACF$acf , type = "l", lwd = 6)
+
+for( i in 1: sims)
+{
+   ACF2 = acf(gen.aruma.wge(84, s = 12, phi = e$phi, plot = "FALSE"), plot = "FALSE")
+   lines(ACF2$lag ,ACF2$acf, lwd = 2, col = "red")
+}
+
+#Compare Generated Realizations 
+eGen = gen.aruma.wge(84, s = 12, phi = e$phi, vara = e$avar)
+plotts.sample.wge(eGen)
+plotts.sample.wge(flu_month$ALL_INF)
+
+```
+
+# Evaluation Methods
+
+To compare the prediction performance of our models to reality, we want to train a model and hold back a test set of a given period of months that I'll call a  *horizon*.  We will sum the squared difference between each predicted value and actual value, and then take the average to generate the Average Squared Error (ASE).  This metric will be the base comparison for all models, and generally the model with the lowest ASE score is the best performing model.
+
+## Helper functions
+
+To help score the models, I have written a couple of helper functions.  A takes a fitted model, predictions and the desired horizon, and it generates plots of actual, predicted and confidence intervals and the ASE for the given model.
+
+```{r eval_model_function}
+
+eval_model <- function(response, predictions, pred_ul = NA, pred_ll = NA, model_name, AIC_val = 0, ending_point = length(response)) {
+  num_predictions = length(predictions)
+  test_stop <- length(response)
+  test_start <- test_stop - num_predictions + 1
+  compare_stop <- test_start - 1
+  compare_start <- compare_stop - num_predictions + 1
+  ASE <- mean((predictions - response[test_start:test_stop])^2)
+
+  # Build predictions dataframe
+  df <- data.frame('Predicted' = predictions)
+  df$Month = row(df)
+  df$Actual = response[test_start:test_stop]
+  df <- gather(df, key='Type', value, -Month)
+  
+  #if we have enough data to plot num_predictions * 2, do it, else use num_predictions
+  starting_point <- compare_start - num_predictions + 1
+  plot_start <- ifelse(starting_point < 0, compare_start, starting_point)
+  month_multiplier <- ifelse(starting_point < 0, -1,-2)
+  
+  # Build predicted vs actual dataframe
+  df <- rbind(df, 
+    data.frame("Month"=c(((num_predictions-1)*month_multiplier):0), 
+               "Type" = 'Actual', 
+               value = response[plot_start:compare_stop]))
+
+  # Built UL/LL dataframes
+  ul <- data.frame("Month"=c(1:num_predictions), pred_ul)
+  ll <- data.frame("Month"=c(1:num_predictions), pred_ll)
+  
+  # Build Plot
+  comparison_plot <- ggplot() + 
+    geom_line(data=df, aes(Month + ending_point - num_predictions, value, color=Type)) + 
+    geom_point(size=.75) + 
+    labs(title=paste(model_name, 'Performance Evaluation'),
+         subtitle=paste0(num_predictions,'-Month Forecast'), 
+         x='Month', 
+         y='ALL_INF Rate',
+         caption=paste0('RMSE: ',round(sqrt(ASE)),
+                       '\nAIC: ',round(AIC_val,6)))
+  
+  # Add confidence intervals if supplied
+  if (length(pred_ul) == length(predictions)){
+    comparison_plot = comparison_plot + 
+      geom_line(aes(ul$Month + ending_point - num_predictions, ul$pred_ul), 
+                color='grey70', linetype = "dashed") 
+  }
+  if (length(pred_ll) == length(predictions)){
+    comparison_plot = comparison_plot + 
+      geom_line(aes(ll$Month + ending_point - num_predictions, ll$pred_ll), 
+                color='grey70', linetype = "dashed") 
+  }
+  
+  return(comparison_plot)
+}
+
+```
+
+```{r eval_model_example, eval=FALSE}
+########## example: AR(2) ########## 
+e <- est.arma.wge(s12, p=2, q=0)
+preds <- fore.aruma.wge(flu_month$ALL_INF, phi = e$phi, theta=e$theta, s = 12,n.ahead = 12, lastn = T, limits = F)
+eval_model(flu_month$ALL_INF,preds$f, preds$ul, preds$ll, 'AR(2) with Annual Trend', AIC_val = e$aic) 
+
+preds <- fore.aruma.wge(flu_month$ALL_INF, phi = e$phi, theta=e$theta, s = 12, n.ahead = 24, lastn = T, limits = F)
+eval_model(flu_month$ALL_INF,preds$f, preds$ul, preds$ll, 'AR(2) with Annual Trend', AIC_val = e$aic) 
+
+```
+
+
+Another function calculates the rolling ASE, which is a measure of the ASE across several windows in time, for a fitted model. This function uses the evaluation function to plot each window and capture score, and then stores them in a list.  This list is then averaged to find the average ASE across several time periods.  By default I use 30 months of training data to evaluate a 12 month period.  The function finally returns a plot of all windows and actual values to visualize performance across the range of data.
+
+
+```{r Rolling_ASE_function}
+
+rolling_ASE <- function (df, fitted_model, d=0, s=0, horizon=12, training_size=30, model_name, model_type = 'ARUMA', p, df_XDF=NA){
+  ASE = list(ASE = c(), plots = c(), multiplot = NA)
+  comp_df <- df %>% dplyr::select(YearMonth, ALL_INF)
+  comp_df$preds = NA
+  names(comp_df) = c('YearMonth','Actual','Predicted')
+  test_stop <- length(df$ALL_INF)
+  loop_end <- floor(test_stop/(training_size+horizon))
+  
+  for (x in 1:loop_end){
+    test_start <- test_stop - horizon + 1
+    train_start <- test_start - training_size 
+    train_stop <- test_start - 1
+    print(paste0('test window: ',test_start,':',test_stop,
+                 ', train window: ',train_start,':',train_stop))
+    data_window <- df$ALL_INF[train_start:train_stop]
+    
+    if(model_type == 'ARUMA') {
+      preds <- fore.aruma.wge(data_window, 
+                              phi=fitted_model$phi, 
+                              theta=fitted_model$theta, 
+                              s=s, 
+                              d=d, 
+                              n.ahead = horizon, 
+                              lastn = F, 
+                              limits = F)
+      pred_object <- preds$f
+    }
+    if(model_type == 'SigPlusNoise') {
+      preds <- fore.sigplusnoise.wge(data_window, max.p = p, n.ahead = horizon, limits=F)
+      pred_object <- preds$f
+    }
+    
+    if(model_type == 'NNFOR') {
+      ts_la <- ts(data_window, start = '1')
+      mlp_model = mlp(ts_la, lags = horizon, hd.auto.type = 'cv')
+      ?mlp
+      preds <- predict(mlp_model, horizon)
+      preds$ul <- NA
+      preds$ll <- NA
+      pred_object <- as.numeric(preds$mean)
+    }
+    
+    if(model_type == 'VAR') {
+      vfit=VAR(cbind(ALL_INF = df$ALL_INF, df_XDF)[train_start:train_stop,], p=p, type='both', season = s)
+      preds=predict(vfit,n.ahead=7)
+      pred_object <- preds$fcst$ALL_INF[,1]
+      preds$ul <- preds$fcst$ALL_INF[,3]
+      preds$ll <- preds$fcst$ALL_INF[,2]
+    }
+
+    a <- mean((pred_object - df$ALL_INF[test_start:test_stop])^2)
+    print(paste('Window ASE:', a))
+    ASE$ASE[x] <- a
+    comp_df$Predicted[test_start:test_stop] = pred_object
+
+    ASE$plots[x] <-
+      plot(eval_model(
+        data_window,
+        pred_object, 
+        model_name = model_name, 
+        AIC_val = ifelse(model_type == 'ARUMA', fitted_model$aic, 0), 
+        pred_ul = preds$ul, 
+        pred_ll = preds$ll,
+        ending_point = test_stop))
+    test_stop = test_stop - training_size
+    
+  }
+  
+  ASE$multiplot <- plot(gather(comp_df, key = Type, value = 'ALL_INF_Rate', -YearMonth) %>% 
+         ggplot(aes(YearMonth, ALL_INF_Rate, color=Type)) + geom_line() +
+         labs(
+           title=paste(model_name, 'Performance Evaluation'),
+           subtitle=paste0(horizon,'-Month Forecast Rolling Window'), 
+           x='Month', 
+           y='Flu Cases',
+           caption=paste0('Average RMSE: ',round(sqrt(mean(ASE$ASE))))
+         )
+       ) 
+  return(ASE)
+}
+
+```
+
+```{r Rolling_ASE_example, eval=FALSE}
+########## example: ARIMA(12,2) ########## 
+e <- est.arma.wge(flu_month$ALL_INF, p=2, q=0)
+test <- rolling_ASE(flu_month, e, s=12, horizon=12, model_name = 'ARMA(2)')
+
+```
+
+# Additional Model Types
+```{r}
+
+########## Sig Plus Noise ########## 
+preds <- fore.sigplusnoise.wge(flu_month$ALL_INF, max.p = 15, n.ahead = 6, limits=F)
+eval_model(flu_month$ALL_INF,preds$f, preds$ul, preds$ll,'SigPlusNoise', 0) #ASE = .000385
+
+preds <- fore.sigplusnoise.wge(flu_month$ALL_INF, max.p = 15, n.ahead = 18, limits=F)
+eval_model(flu_month$ALL_INF,preds$f, preds$ul, preds$ll,'SigPlusNoise', 0) #ASE = .003437 (BAD)
+
+
+
+```
+
+# MLP
+```{r}
+library(nnfor)
+mFlu <- ts(flu_month$ALL_INF[1:78], start = '1')
+x = mlp(mFlu, lags = 12, hd.auto.type = 'cv', reps=10)
+plot(x)
+preds <- predict(x, 6)
+plot(preds)
+eval_model(flu_month$ALL_INF,preds$mean,6,model_name = 'MLP', AIC_val = 0) #ASE = .000766
+
+
+mFlu <- ts(flu_month$ALL_INF[1:66], start = '1')
+x = mlp(mFlu, lags = 12, m = 1, hd.auto.type = 'cv')
+plot(x)
+preds <- predict(x, 18)
+plot(preds)
+eval_model(flu_month$ALL_INF,preds$mean,90,model_name = 'MLP', AIC_val = 0) #ASE = .000852
+
+rolling <- rolling_ASE(flu_month, e, s=12, horizon=6, model_name = 'MLP', model_type = 'NNFOR') #ASE .000637
+```
+
+
+

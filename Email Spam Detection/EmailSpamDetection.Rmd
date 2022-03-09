@@ -1,0 +1,440 @@
+---
+title: "CaseStudy6"
+output: html_notebook
+author: "Dustin Bracy, Grace Lang, Paul Huggins, Branum Stephan"
+date: "2/3/2021"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r library install}
+library(tidyverse)
+library(DataExplorer)
+library(dplyr)
+library(ggplot2)
+library(esquisse)
+library(rvest)
+library(stringr)
+library(chron)
+library(data.table)
+library(scales)
+library(VIM)
+library(xgboost)
+library(mlr)
+library(rsample)
+library(caret)
+library(DiagrammeR)
+library(randomForest)
+library(caTools)
+library(MASS)
+```
+
+```{r load data}
+# load rda file
+load("../QTW_Spring2021/Unit6_CaseStudy/data/data.Rda")
+
+# save copy of raw data for backup
+backup <- emailDFrp
+
+# convert to df
+emailDFrp <- data.frame(emailDFrp)
+```
+
+```{r missing values}
+# what are the data types of each column?
+str(emailDFrp) # everything looks correct
+
+# identity null values
+missing_graph <- aggr(emailDFrp)
+
+# plot missing
+missing_plot <- plot_missing(emailDFrp, missing_only = T,ggtheme = transparent())
+
+# missing list
+na_count <-sapply(emailDFrp, function(y) sum(length(which(is.na(y)))))
+na_count
+
+# only take rows without missing values
+emailDFrp <- emailDFrp[complete.cases(emailDFrp),]
+```
+
+```{r EDA}
+#Add copy for just EDA
+eda <- backup
+
+#Spam Count
+SpamCnt <- eda %>% group_by(isSpam) %>% summarise(n=n())
+
+#Graph of total spam
+SpamCnt %>%
+ ggplot() +
+ aes(x = isSpam, y=n) +
+ geom_bar(stat="identity",fill = "#23C7AC") +
+ theme(plot.title = element_text(hjust=0.5)) +
+ labs(x="Spam", y="Number of Emails", title = "Number of Emails by Spam") +
+ theme_minimal()
+
+
+# Group PerCaps 
+  #initially i did this in increments of 10, but i found that just a breakout of two was more impactful
+eda <- eda %>% mutate(perCapGroup = case_when(
+                                             perCaps >= 10  & perCaps <= 100 ~ '10+',
+                                              perCaps < 10 ~ '0-10')) # end
+
+#Spam Count with capital letters
+Capital <- eda %>% group_by(isSpam, perCapGroup) %>% summarise(n=n())
+
+#stacked bar of capital letters
+ggplot(Capital, aes(fill=isSpam,y=n,x=perCapGroup))+
+  geom_bar(position="stack",stat="identity")+
+  theme(plot.title = element_text(hjust=0.5)) +
+  labs(x="Percent of Message Written in Capital Letters", y="Number of Emails", title = "Number of Emails by Percent of Capital Letters in Body of Message") +
+  theme_minimal()
+
+#Number of Forwards  - double checking results of regression tree
+eda <- eda %>% mutate(forwardgroup = case_when(
+                                             forwards >= 6  & forwards <= 100 ~ '6+',
+                                              forwards < 6 ~ '0-5.9')) # end
+Forwards <- eda %>% group_by(isSpam, forwardgroup) %>% summarise(n=n())
+
+```
+
+```{r standard scaling}
+emailDFrp[c(18:30)] <- scale(emailDFrp[c(18:30)])
+```
+
+```{r convert datatypes}
+emailDFrp[,1:17]=lapply(1:17,function(x) {
+  tryCatch({
+    as.logical(emailDFrp[[x]])
+    },warning = function(w) {
+    emailDFrp[[x]]}
+        )} )
+
+emailDFrp[,1:17]=lapply(1:17,function(x) {
+  tryCatch({
+    as.integer(emailDFrp[[x]])
+    },warning = function(w) {
+    emailDFrp[[x]]}
+        )} )
+
+str(emailDFrp)
+```
+
+```{r xgboost using azureml optimal parms}
+set.seed(123)
+
+# create dataset for xgboost
+xgbdata <- emailDFrp
+
+# create test train splits
+indexes = createDataPartition(xgbdata$isSpam, p=.75, list=F)
+train = xgbdata[indexes, ]
+test = xgbdata[-indexes, ]
+
+train_x = data.matrix(train[,-1])
+train_y = train[,1]
+ 
+test_x = data.matrix(test[,-1])
+test_y = test[,1]
+
+# convert to matrices
+xgb_train = xgb.DMatrix(data=train_x, label=train_y)
+xgb_test = xgb.DMatrix(data=test_x, label=test_y)
+
+# build optimized model from AzureML
+xgbc = xgboost(data=xgb_train, 
+               max.depth=9,
+               nrounds=100,
+               gamma = 0.01,
+               max_leaves = 127,
+               colsample_bytree = 1,
+               colsample_bylevel = 0.7,
+               objective = "reg:logistic",
+               lambda = 0.41667,
+               subsample = 1,
+               eta = 0.3
+               )
+
+# view model
+xgbc
+
+# predict on test data
+pred = predict(xgbc, xgb_test)
+print(pred)
+pred[(pred>0.5)] = 1
+pred[(pred<0.5)] = 0
+pred_y = as.factor(pred)
+test_y = as.factor(test_y)
+print(pred_y)
+
+# confusion matrix
+cm = confusionMatrix(pred_y, test_y)
+print(cm)
+
+# plot
+xgb.plot.tree(model = xgbc, trees = 0, show_node_id = TRUE)
+
+```
+
+```{r random forest with cv}
+set.seed(123)
+
+# create dataset for rf
+rfdata <- emailDFrp
+
+test_size = floor(0.25 * nrow(rfdata))
+samp = sample(nrow(rfdata), test_size,replace = FALSE)
+y_train = rfdata[-samp,1]
+x_train = rfdata[-samp,-1] 
+y_test= rfdata[samp,1]
+x_test = rfdata[samp,-1] 
+
+#convert labels to categorical
+y_train = factor(y_train)
+y_test = factor(y_test)
+
+#Create training set and testing set
+train = cbind(y_train,x_train)
+test = cbind(y_test,x_test)
+
+# colnames
+colnames(train)[1] = "label"
+colnames(test)[1] = "label"
+
+# 5-fold cv
+crossval = rfcv(trainx = x_train, 
+             trainy = train_y,
+             cv.fold=5, 
+             scale="log", 
+             step=0.5,
+             mtry=function(p) max(1, floor(sqrt(p))), 
+             recursive=FALSE)
+
+# plot of error rate by number of variables used in model
+with(crossval, plot(n.var, error.cv, log="x", type="o", lwd=2,
+                    xlab="Number of Variables", ylab="Error Rate"))
+# title for plot
+title(main="Estimated Error Rate")
+
+# error rate of various models by number of predictors
+crossval$error.cv
+
+# build model using all 29 estimators
+model = randomForest(label~., data = train,
+                     max_features = 0.2,
+                     min_samples_leaf = 0.01,
+                     min_samples_split = 0.10368421,
+                     n_estimators = 29,
+                     oob_score = FALSE,
+                     importance = TRUE)
+
+# view results
+print(model)
+
+# predict
+pred = predict(model, x_test)
+table(y_test, pred)
+accuracy = mean(y_test == pred)
+accuracy
+
+# plot importance
+importance = importance(model)
+varImportance = data.frame(Variables = row.names(importance),
+ Importance =round(importance[, "MeanDecreaseAccuracy"],2))
+rankImportance=varImportance%>%mutate(Rank=paste("#",dense_rank(desc(Importance))))
+ggplot(rankImportance,aes(x=reorder(Variables,Importance),
+ y=Importance,fill=Importance))+ 
+ geom_bar(stat="identity") + 
+ geom_text(aes(x = Variables, y = 0.5, label = Rank),
+ hjust=0, vjust=0.55, size = 4, colour = "white") +
+ labs(x = "Variables") +
+ coord_flip() + scale_fill_gradient(high='#23C7AC', low='#37474F')
+
+```
+
+```{r regression tree with cv}
+library(tree)
+# create dataset for regressiontree
+tree.data <- emailDFrp
+
+# create test train splits
+indexes = createDataPartition(tree.data$isSpam, p=.75, list=F)
+tree.data.train = tree.data[indexes, ]
+tree.data.test = tree.data[-indexes, ]
+
+#full dataset
+par(mfrow=c(1,1))
+tree.bank<-tree(isSpam~.,tree.data)
+summary(tree.bank)
+plot(tree.bank)
+text(tree.bank,pretty=0)
+
+#downsampled training
+par(mfrow=c(1,1))
+tree.bank<-tree(isSpam~.,tree.data.train )
+summary(tree.bank)
+plot(tree.bank)
+text(tree.bank,pretty=0)
+
+
+#Perform CV to deterine if we need to prune the tree. -- 14 parameters was the lowest
+set.seed(1234)
+cv.tree<-cv.tree(tree.bank,FUN=prune.tree)
+plot(cv.tree)
+plot(cv.tree$size, cv.tree$dev, type='b')
+
+#Fitting a final model for predicting future values. 
+#10 parameters seems to be the best fit from an application standpoint & plateau of cv
+prune.bank=prune.tree(tree.bank,best=10)
+plot(prune.bank)
+text(prune.bank,pretty=0)
+
+```
+
+```{r xgboost using grid search and 5-fold cv}
+# parameter search
+#searchGridSubCol <- expand.grid( subsample = c(0.4, 0.5, 0.6), 
+                                #colsample_bytree = c(0.4, 0.5, 0.6),
+                                #max_depth = c(8, 9, 10),
+                                #eta = c(0.1, 0.2, 0.3),
+                                #min_child = seq(1), 
+                                #gamma = c(0.01, 0.02, 0.03),
+                                #max_leaves = 0,
+                                #lambda = c(0.3, 0.4, 0.5),
+                                #nrounds = 100,
+#)
+
+# run models and tune parms - takes 3-5 hrs
+#system.time(
+#rmseErrorsHyperparameters <- apply(searchGridSubCol, 1, function(parameterList){
+  
+  # Extract Parameters to test
+  #currentSubsampleRate <- parameterList[["subsample"]]
+  #currentColsampleRate <- parameterList[["colsample_bytree"]]
+  #currentDepth <- parameterList[["max_depth"]]
+  #currentEta <- parameterList[["eta"]]
+  #currentMinChild <- parameterList[["min_child"]]
+  #currentGamma <- parameterList[["gamma"]]
+  #currentLambda <- parameterList[["lambda"]]
+  #xgboostModelCV <- xgb.cv(data =  xgb_train, nrounds = ntrees, nfold = 5, showsd = TRUE, 
+                       #metrics = "rmse", verbose = TRUE, "eval_metric" = "rmse",
+                     #objective = "reg:logistic", "max.depth" = currentDepth, "eta" = currentEta,                
+                     #"subsample" = currentSubsampleRate, "colsample_bytree" = currentColsampleRate
+                      #, print_every_n = 10, "min_child_weight" = currentMinChild, "gamma" = currentGamma, "lambda" = currentLambda, booster = "gbtree",
+                     #early_stopping_rounds = 10)
+  
+  #xvalidationScores <- as.data.frame(xgboostModelCV$evaluation_log)
+  #rmse <- tail(xvalidationScores$test_rmse_mean, 1)
+  #trmse <- tail(xvalidationScores$train_rmse_mean,1)
+  #output <- return(c(rmse, trmse, currentSubsampleRate, currentColsampleRate, currentDepth, currentEta, #currentGamma, currentLambda, currentMinChild))}))
+
+# output optimized parameters table
+#output <- as.data.frame(t(rmseErrorsHyperparameters))
+#varnames <- c("TestRMSE", "TrainRMSE", "SubSampRate", "ColSampRate", "Depth", "eta", "Gamma", "Lambda", "currentMinChild")
+#names(output) <- varnames
+#head(output)
+
+
+# results table from above grid search
+# TtestRMSE | TrainRMSE | SubSampRate | ColSampRate | Depth | ETA | Gamma | Lambda | MinChild|
+#  0.189723 | 0.166902  |    0.3      |    0.3      |   5   | 0.1 | 0.01  |   0.2  |   1     |
+
+# build model using optimized parameters
+xgbc = xgboost(data=xgb_train, 
+               max.depth=5,
+               nrounds=100,
+               gamma = 0.01,
+               max_leaves = 0,
+               objective = "reg:logistic",
+               lambda = 0.2,
+               subsample = 0.3,
+               eta = 0.1
+               )
+
+# Review the final model and results
+xgbc
+
+# plot
+xgb.plot.tree(model = xgbc, trees = 0, show_node_id = TRUE)
+
+# predict
+pred = predict(xgbc, xgb_test)
+print(pred)
+pred[(pred>0.5)] = 1
+pred[(pred<0.5)] = 0
+pred_y = as.factor(pred)
+test_y = as.factor(test_y)
+print(pred_y)
+
+# confusion matrix
+cm = confusionMatrix(pred_y, test_y, positive = '1')
+print(cm)
+```
+
+
+
+```{r PPT Plots}
+transparent <- function() {   
+theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA),
+        legend.background = element_rect(fill = "transparent",colour = NA),
+        legend.position = "none"
+)}
+
+# plot missing
+missing.values <- backup %>%
+  gather(key = "key", value = "val") %>%
+  mutate(isna = is.na(val)) %>%
+  group_by(key) %>%
+  mutate(total = n()) %>%
+  group_by(key, total, isna) %>%
+  summarise(num.isna = n()) %>%
+  mutate(pct = num.isna / total * 100)
+
+## `summarise()` regrouping output by 'key', 'total' (override with `.groups` argument)
+
+levels <-
+    (missing.values  %>% filter(isna == T) %>% arrange(pct))$key
+
+percentage.plot <- missing.values %>%
+      ggplot() +
+        geom_bar(aes(x = reorder(key, desc(pct)), 
+                     y = pct, fill=isna), 
+                 stat = 'identity', alpha=0.8) +
+      scale_x_discrete(limits = levels) +
+      scale_fill_manual(name = "", 
+                        values = c('#23C7AC', '#37474F'), labels = c("Missing", "Present")) +
+      coord_flip() +
+      labs(x =
+             'Variable', y = "% of missing values") + transparent() + ylim(0,5)
+
+
+percentage.plot
+
+ggsave(plot = percentage.plot, file = "../QTW_Spring2021/Unit6_CaseStudy/images/missing.png", 
+       bg = "transparent",
+       width = 10, height = 10, units = "cm", dpi = 800) 
+
+
+
+#fct_count(emailDFrp$isYelling)
+
+# Feature importance
+FI_plot <- ggplot(rankImportance,aes(x=reorder(Variables,Importance),
+ y=Importance,fill=Importance))+ 
+ geom_bar(stat="identity") + 
+ geom_text(aes(x = Variables, y = 0.5, label = Rank),
+ hjust=0, vjust=0.55, size = 3, colour = "white") +
+ labs(x = "Email Features", y='') +
+ coord_flip() + scale_fill_gradient(high='#23C7AC', low='#37474F') + transparent() + 
+    theme(axis.text.x = element_blank(),
+    axis.ticks = element_blank())
+
+ggsave(plot = FI_plot, file = "../QTW_Spring2021/Unit6_CaseStudy/images/importance.png", 
+       bg = "transparent",
+       width = 10, height = 10, units = "cm", dpi = 800) 
+```
+

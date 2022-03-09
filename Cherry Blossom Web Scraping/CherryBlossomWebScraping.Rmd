@@ -1,0 +1,600 @@
+---
+title: "CaseStudy4"
+output: html_notebook
+author: "Dustin Bracy, Grace Lang, Paul Huggins, Branum Stephan"
+date: "1/24/2020"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r library install}
+library(tidyverse)
+library(DataExplorer)
+library(dplyr)
+library(ggplot2)
+library(esquisse)
+library(rvest)
+library(stringr)
+library(chron)
+library(data.table)
+library(scales)
+```
+
+
+# Data Extraction, Transformation & Loading:
+
+## Extraction via web scraping
+```{r Web scraper function, eval=FALSE}
+# parse page-wise data for a given year
+parse_page <- function(year){
+  output = c()
+  page = 1
+  while(TRUE){
+    run_results <- read_html(paste("http://www.cballtimeresults.org/performances?division=Overall+Women&page=", page, "&section=10M&sex=W&utf8=%E2%9C%93&year=", year, sep=""))
+    results <- data.frame(run_results %>% html_table())
+    if(nrow(results) > 0) {
+      output = rbind(output, results)
+      print(paste("Processing for page: ", page))
+      page = page + 1
+    }
+    else{
+      break
+    }
+  }
+  return(output)
+}
+
+# loop through multiple years
+pull_all_run_info <- function(){
+  total_output = c()
+  for(year in c(1999: 2012)){
+    print(paste("\tfetching for year:", year))
+    total_output = rbind(total_output, parse_page(year))
+  }
+  return(total_output)
+}
+
+# run scraper
+cb_data <- pull_all_run_info()
+
+```
+
+## Data Transformation
+```{r save copies and write to csv for record, eval=FALSE}
+# save original copy of data so we don't have to re run scraper
+cb_orig <- cb_data
+
+# write out original to csv for record
+# write.csv(cb_orig, "/Unit4_CaseStudy/data/CB_Raw_Data.csv", header = TRUE)
+
+# save copy to manipulate and parse
+cb_race <- cb_data
+```
+
+```{r data cleanup and feature engineering, eval=FALSE}
+cb_race <- as.data.frame(cb_race)
+
+# drop 10M from the first column and then rename Name to Year
+cb_race$Race <- str_split(cb_race$Race, " ", simplify = TRUE)
+colnames(cb_race)[1] <- "Year"
+
+# drop (W) from the second column since all participants are Women
+cb_race$Name <- gsub("\\s*\\([^\\)]+\\)","",as.character(cb_race$Name))
+
+# split the hometown column into each part
+hometownsplit <- data.frame(do.call("rbind", strsplit(as.character(cb_race$Hometown), ",", fixed = TRUE)))
+hometownsplit$X3 <- ifelse(hometownsplit$X1 %in% hometownsplit$X2, hometownsplit$X2, "NaN")
+hometownsplit$X1 <- ifelse(hometownsplit$X1 %in% hometownsplit$X2, "NaN", hometownsplit$X1)
+hometownsplit$X3 <- ifelse(hometownsplit$X3 %in% c("NaN"), "USA", hometownsplit$X3)
+hometownsplit$X2 <- gsub('\\s+', '', hometownsplit$X2)
+hometownsplit$X2 <- ifelse(nchar(hometownsplit$X2) > 3, "NaN", hometownsplit$X2)
+trim.leading <- function (x)  sub("^\\s+", "", x)
+hometownsplit$X3 <- trim.leading(hometownsplit$X3)
+hometownsplit$X3 <- ifelse(hometownsplit$X2 %in% hometownsplit$X3, "NR", hometownsplit$X3)
+hometownsplit$X3 <- ifelse(hometownsplit$X3 %in% c("NR"), "USA", hometownsplit$X3)
+
+# split the pace column
+pacesplit <- data.frame(do.call("rbind", strsplit(as.character(cb_race$Pace), ":", fixed = TRUE)))
+
+# split the time column
+timesplit <- data.frame(do.call("rbind", strsplit(as.character(cb_race$Time), ":", fixed = TRUE)))
+
+# rejoin the splits with the data
+cb_race <- cbind(cb_race, 
+                 TimeHrs = timesplit$X1, 
+                 TimeMin = timesplit$X2, 
+                 TimeSec = timesplit$X3, 
+                 PaceMin = pacesplit$X1, 
+                 PaceSec = pacesplit$X2,
+                 City = hometownsplit$X1,
+                 State = hometownsplit$X2,
+                 Country = hometownsplit$X3)
+
+
+# Format type
+cb_race$TimeHrs <- as.numeric(cb_race$TimeHrs)
+cb_race$TimeMin <- as.numeric(cb_race$TimeMin)
+cb_race$TimeSec <- as.numeric(cb_race$TimeSec)
+cb_race$PaceMin <- as.numeric(cb_race$PaceMin)
+cb_race$PaceSec <- as.numeric(cb_race$PaceSec)
+
+# Calculate total race time in seconds
+cb_race$TotalTimeSec <- round(((cb_race$TimeHrs*60*60) + (cb_race$TimeMin*60) + cb_race$TimeSec), digits = 3)
+cb_race$TotalTimeMin <- round(cb_race$TotalTimeSec/60, digits = 3)
+
+
+# Calculate pace in seconds
+cb_race$PaceTimeSec <- round(((cb_race$PaceMin*60) + cb_race$PaceSec), digits = 3)
+cb_race$PaceTimeMin <- round(cb_race$PaceTimeSec/60, digits = 3)
+
+# Add age group column
+cb_race <- cb_race %>% mutate(AgeGroup = case_when(Age >= 80  & Age <= 89 ~ '80s',
+                                             Age >= 70  & Age <= 79 ~ '70s',
+                                             Age >= 60  & Age <= 69 ~ '60s',
+                                             Age >= 50  & Age <= 59 ~ '50s',
+                                             Age >= 40  & Age <= 49 ~ '40s',
+                                             Age >= 30  & Age <= 39 ~ '30s',
+                                             Age >= 20  & Age <= 29 ~ '20s',
+                                             Age >= 10  & Age <= 19 ~ '10s')) # end function
+
+# convert back to cb_race from lists
+is.data.frame(cb_race)
+is.list(cb_race)
+cb_race <- as.list(cb_race)
+(y <- do.call(cbind, cb_race))
+cb_race <- as.data.frame(y)
+
+# Drop temp columns
+drops <- c("TimeHrs", "TimeMin", "TimeSec", "PaceMin", "PaceSec", "Hometown", "V2")
+cb_race <- cb_race[,!(names(cb_race) %in% drops)]
+colnames(cb_race)[1] <- "Year"
+
+# Set column types
+str(cb_race)
+cb_race$Year <- as.factor(cb_race$Year)
+cb_race$Age <- as.numeric(cb_race$Age)
+cb_race$Division <- as.factor(cb_race$Division)
+cb_race$TotalTimeMin <- as.numeric(cb_race$TotalTimeMin)
+cb_race$TotalTimeSec <- as.numeric(cb_race$TotalTimeSec)
+cb_race$PaceTimeMin <- as.numeric(cb_race$PaceTimeMin)
+cb_race$PaceTimeSec <- as.numeric(cb_race$PaceTimeSec)
+cb_race$AgeGroup <- as.factor(cb_race$AgeGroup)
+str(cb_race)
+
+# Convert missing to Na's
+cb_race[cb_race == "NaN" ] <- NA
+cb_race[cb_race == "NR" ] <- NA
+
+# save out rda file
+write.table(cb_race, "../QTW_Spring2021/Unit4_CaseStudy/data/CB_Edited_v2.Rda")
+```
+
+# Data Loading:
+
+## Read in clean data
+```{r read in RDA - start here for clean data set}
+cb_race <- read.table("../QTW_Spring2021/Unit4_CaseStudy/data/CB_Edited_v2.Rda")
+```
+
+# Business Analysis
+
+## Exploratory Data Analysis
+```{r EDA}
+#number of nulls
+sum(is.na(cb_race$Age)) ## 20 
+nulls <- subset(cb_race, is.na(Age))
+
+#Graph of nulls by year
+nulls %>%
+ ggplot() +
+ aes(x = Year) +
+ geom_histogram(bins = 30, fill = "#FC4A9B") +
+ theme(plot.title = element_text(hjust=0.5)) +
+ labs(x="Year", y="Number of No Age", title = "Number of Runners with No Age Record") +
+ theme_minimal()
+
+#Remove nulls from cb_race
+cb_race <- na.omit(cb_race)
+
+#Count of runners by Year
+cb_race %>%
+ filter(!(Division %in% "")) %>%
+ filter(!(Country %in% "")) %>%
+ ggplot() +
+ aes(x = Year) +
+ geom_histogram(bins = 30, fill = "#FC4A9B") +
+ theme(plot.title = element_text(hjust=0.5)) +
+ labs(x="Year", y="Number of Runners", title = "Total Runners Over Time") +
+ theme_minimal()
+
+#Avg growth of runners per year = 12% 
+YearCnt <- cb_race %>% group_by(Year) %>% summarise(n=n())
+
+#Country group by 
+CountryCnt <- cb_race %>% group_by(Country) %>% summarise(n=n())
+
+#Records have null as Country/City/State
+  #cb_race[cb_race$State=='mo',]
+  #[cb_race$Country=="NY",] 
+
+#Fixing the rows that have incorrect Country, to be listed under state
+cb_race[cb_race$State=='va' ,"State"] <- "VA"
+cb_race[cb_race$State=='ga' ,"State"] <- "GA"
+cb_race[cb_race$State=='mo' ,"State"] <- "MO"
+
+#Top USA States in last 5 years
+ByState <- cb_race %>% group_by(State) %>%dplyr::summarise(StateCount = n())
+ByState <- ByState[order(-ByState$StateCount),] 
+
+#Top 3 states make up 84% of all runners:
+sum(select(top_n(ByState, 3), 'StateCount')) / sum(ByState$StateCount)
+
+#Subsetting the data into top/bottoms
+Top10 = subset(ByState[1:10,])
+Bottom10 = subset(ByState[46:55,])
+
+#Top 10 Graph
+ggplot(Top10, aes(x=reorder(State,-StateCount),
+                  y=StateCount,fill=State)) + 
+                  geom_bar(stat = "identity") + 
+                  theme_minimal() + 
+                  theme(plot.title = element_text(hjust=0.5)) + 
+                  labs(x="State", y="Number of Runners", title = "Top 10 States With The Most Runners")
+
+#Count of AgeGroup by Year
+AgeCount <- cb_race %>% group_by(AgeGroup,Year) %>% summarise(n=n())
+#The 20's & 30's group makes up about 75.5 percent of total runners in 2012
+
+#Average Time
+cb_race12 <- subset(cb_race, cb_race$Year==2012)
+mean(times(cb_race12$Total.Time))
+#01:39:01
+
+#Does age need cleaning?
+#AgeClean <- cb_race %>% group_by(Age) %>% summarise(n=n())
+
+# Plot of total race time by age group
+cb_race %>%
+ filter(!is.na(AgeGroup)) %>%
+ ggplot() +
+ aes(x = "", y = TotalTimeMin, fill = AgeGroup) +
+ geom_boxplot() +
+ scale_fill_hue() +
+ labs(y = "Total Race Time (Minutes)", title = "Womens 10M Cherry Blossom Race", subtitle = "Total Race Time by Age Group") +
+ theme_bw()
+
+# Plot of ages by division
+ggplot(cb_race) +
+ aes(x = "", y = Age, fill = Division) +
+ geom_boxplot() +
+ scale_fill_hue() +
+ labs(y = "Age", title = "Womens 10M Cherry Blossom Race", subtitle = "Total Race Time by Age Group") +
+ theme_bw()
+
+# Completion time by division
+cb_race %>%
+ filter(!is.na(Division)) %>%
+ ggplot() +
+ aes(x = "", y = TotalTimeMin, fill = Division) +
+ geom_boxplot() +
+ scale_fill_hue() +
+ labs(y = "Total Race Time (Minutes)", title = "Womens 10M Cherry Blossom Race", subtitle = "Total Race Time by Age Division") +
+ theme_bw()
+
+# Total time by age group over time
+cb_race %>%
+ filter(!is.na(AgeGroup)) %>%
+ ggplot() +
+ aes(x = Year, y = TotalTimeMin, colour = AgeGroup) +
+ geom_boxplot(fill = "#0c4c8a") +
+ labs(y = "Total Race Time (Minutes)", title = "Womens 10M Cherry Blossom Race", subtitle = "Total Race Time by Age Group Over Time") +
+ scale_color_hue() +
+ theme_bw()
+
+#plot avg runtime by AgeGroup
+cb_race %>% group_by(Year = as.integer(Year)+1998, AgeGroup) %>% 
+  summarise(AvgRunTime = mean(TotalTimeMin)) %>%
+  ggplot() + aes(x = Year, y = AvgRunTime, colour = AgeGroup) + geom_line() +
+ scale_color_hue() + theme_bw() + scale_x_continuous(breaks=c(1999:2012))
+
+#Caclulate percent change each year
+cb_race %>% group_by(Year = as.integer(Year)+1998) %>% 
+  summarise(AvgRunTime = mean(TotalTimeMin)) %>%
+mutate(pct_change = (AvgRunTime/lag(AvgRunTime) - 1) * 100)
+
+
+```
+
+## Age distribution of runners from 1999-2012
+```{r}
+# runner age over each year
+cb_race$Year <- as.factor(cb_race$Year)
+ggplot(cb_race) +
+ aes(x = Year, y = Age, fill = Year) +
+ geom_boxplot() +
+ scale_fill_hue() +
+ labs(x = "Year of Race", y = "Age of Runner", title = "Cherry Blossom Race", subtitle = "Runner Age over Years") +
+ theme_bw()
+
+# get mean age at each year
+age_over_years <- aggregate(cb_race$Age, list(cb_race$Year), mean)
+colnames(age_over_years)[1] <- "Year"
+colnames(age_over_years)[2] <- "MeanAge"
+age_over_years$MeanAge <- round(age_over_years$MeanAge, digits = 3)
+age_over_years
+
+# calculate % change year over year
+perc_chg <- setDT(age_over_years)[, new.col := MeanAge/shift(MeanAge) - 1]
+colnames(perc_chg)[3] <- "PerChng"
+perc_chg$PerChng <- round(perc_chg$PerChng, digits = 3)*100
+perc_chg
+
+# average change over all years combined
+mean_perc_chg <- subset(perc_chg, perc_chg$Year != 1999)
+mean_perc_chg$PerChng <- as.numeric(mean_perc_chg$PerChng)
+mean_perc_chg <- mean(mean_perc_chg$PerChng)
+mean_perc_chg
+
+# plot of average age over years
+ggplot(perc_chg) +
+ aes(x = Year, y = MeanAge) +
+ geom_line(size = 1, group = "#482878") +
+ labs(y = "Average Runner Age", title = "Cherry Blossom Race", subtitle = "Average Runner Age Over Time") +
+ theme_bw()
+
+# density plot 1
+ggplot(cb_race) +
+ aes(x = Age, fill = Year) +
+ geom_density(adjust = 1L) +
+ scale_fill_hue() +
+ labs(title = "Cherry Blossom Race", subtitle = "Runner Age Density Plots") +
+ theme_bw() +
+ facet_grid(vars(Year), vars())
+
+# density plot 2
+ggplot(cb_race) +
+ aes(x = Age, fill = Year) +
+ geom_density(adjust = 1L, alpha = 0.5) +
+ scale_fill_hue() +
+ labs(title = "Cherry Blossom Race", subtitle = "Density Plot of Runner Age over Time") +
+ theme_bw()
+
+```
+
+## Racer Spotlight
+```{r}
+dupe = cb_race[,c("Name","City", "State")] # select columns to check duplicates
+dupe2 = cb_race[duplicated(dupe) | duplicated(dupe, fromLast=TRUE),]
+dupe3 = as.data.frame((table(dupe2$Name)))
+
+# Angela Clark, Ann Robb, Betty Blank, Blake Rushin, Kate Mount, Lourdes Hinayon, Malissa Zimmerman, Muffet Chatterton, Sunny Fitzgerald have all ran the race more 13 more times.
+
+spotlight <- cb_race[ which(Name=="Muffet Chatterton"),]
+
+```
+
+```{r age_plot, eval=FALSE}
+# Build transparent plots for PPT:
+# Mean age by year
+p <- ggplot(perc_chg) +
+ aes(x = Year, y = MeanAge) +
+ geom_line(size = 1, group = "#482878") +
+ labs(y = "Average Runner Age", x='') +
+# theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA)
+  )
+p
+ggsave(plot = p, file = "../QTW_Spring2021/Unit4_CaseStudy/fig/age.png", 
+       bg = "transparent",
+       width = 14, height = 5, units = "cm", dpi = 800)
+
+
+#Age Distribution
+p <- ggplot(cb_race) +
+  aes(x = Year, y = Age) +
+ geom_boxplot(fill = 'hotpink1', color='black') +
+ scale_fill_hue() +
+ labs(x = "", y = "Age") +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA),
+        legend.position = "none")
+p
+
+
+ggsave(plot = p, file = "../QTW_Spring2021/Unit4_CaseStudy/fig/age_dist.png", 
+       bg = "transparent",
+       width = 12, height = 8, units = "cm", dpi = 800)   
+
+
+# Completion time distribution by division
+p <- cb_race %>%
+ filter(!is.na(Division)) %>%
+ ggplot() +
+ aes(x = Division, y = TotalTimeMin) +
+ geom_violin(fill='hotpink1', color='black') +
+# scale_fill_hue() +
+ labs(y = "Race Time (Minutes)") +
+   theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA),
+        legend.position = "none",
+        axis.text.x = element_text(angle = 45))
+
+p
+
+ggsave(plot = p, file = "../QTW_Spring2021/Unit4_CaseStudy/fig/time_dist.png", 
+       bg = "transparent",
+       width = 14, height = 5, units = "cm", dpi = 800) 
+
+#Division Distribution
+
+
+p <- cb_race %>%
+ filter(!is.na(Division)) %>%
+  filter(Year == 2012) %>%
+  group_by(Division) %>% summarise(Runners = n()) %>%
+ ggplot() +
+ aes(x = Division, y = Runners) +
+ geom_col(fill='hotpink1', color='black') +
+# scale_fill_hue() +
+ labs(y = "Runners") +
+   theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA),
+        legend.position = "none",
+        axis.text.x = element_text(angle = 45))
+p
+
+ggsave(plot = p, file = "../QTW_Spring2021/Unit4_CaseStudy/fig/division_dist_v2.png", 
+       bg = "transparent",
+       width = 14, height = 5, units = "cm", dpi = 800) 
+
+
+# simple linear regression for expected number of runners for next year:
+runnersPerYear <- cb_race %>%
+ filter(!is.na(Division)) %>%
+  group_by(Year) %>% summarise(Runners = n())
+
+runnersPerYear$Year = as.integer(runnersPerYear$Year)+1998
+fit <- lm(Runners~Year, data=runnersPerYear)
+predict(fit, data.frame(Year=2013)) #9,998
+
+summary(fit)
+runnersPerYear
+
+```
+
+## ANOVA
+
+There is significant results that the Total time it takes a woman to run the race is different by Age group over the years. 
+
+```{r anova}
+attach(cb_race)
+mysummary<-function(x){
+  result<-c(length(x),mean(x),sd(x),sd(x)/length(x))
+  names(result)<-c("N","Mean","SD","SE")
+  return(result)
+}
+sumstats<-aggregate(TotalTimeMin~Year*AgeGroup,data=cb_race,mysummary)
+sumstats<-cbind(sumstats[,1:2],sumstats[,-(1:2)])
+sumstats
+
+
+#Standard Deviation plot
+ggplot(sumstats,aes(x=Year,y=Mean,group=AgeGroup,colour=AgeGroup))+
+  ylab("Total Time in Minutes")+
+  geom_line()+
+  geom_point()+
+  geom_errorbar(aes(ymin=Mean-SD,ymax=Mean+SD),width=.1)
+
+#Based on this std dev graph, it looks like there is a clear distinction between means by age group... we might possible need to do multiple ANOVAS to compare different ages across the years. 
+
+
+#PAUL's
+# Compute the analysis of variance
+res.aov <- aov(TotalTimeMin ~ AgeGroup, data = cb_race)
+#res.aov <- aov(TotalTimeMin ~ Division, data = cb_race)
+
+# Summary of the analysis
+summary(res.aov)
+
+# p-value of 2e-16 indicates that there is strong evidence to suggest that the mean race time in minutes by age group is different.
+
+# Difference between groups
+diffs <- TukeyHSD(res.aov)
+# The difference between 20s & 10s, 80's & 60's, 80's & 70's age groups indicate that there is no evidence for a difference between the mean finish times of those racers.
+diffs
+
+
+# Plot residual diagnostics:
+par(mfrow=c(2,2))
+plot(res.aov)
+
+
+par(mfrow=c(1,2))
+res = residuals(res.aov)
+hist(res)
+plot(density(res))
+
+par(mfrow=c(1,1))
+```
+
+## ANOVA (cont)
+Currently we started to look at the two largest age groups of runners in the race: women in their 20s and 30s. 
+
+```{r ANOVA by 20s}
+cb_race20s <- subset(cb_race, cb_race$AgeGroup=="20s")
+
+# For those women in their 20s did their avg time vary across the years
+res.aov2 <- aov(TotalTimeMin ~ Year, data = cb_race20s)
+# Summary of the analysis
+summary(res.aov2)
+
+sumstats2<-aggregate(TotalTimeMin~Year*AgeGroup,data=cb_race20s,mysummary)
+sumstats2<-cbind(sumstats2[,1:2],sumstats2[,-(1:2)])
+sumstats2
+
+ggplot(sumstats2,aes(x=Year,y=Mean,group=AgeGroup,colour=AgeGroup))+
+  ggtitle("Age Variance of Women in their 20s over time") +
+  ylab("Total Time in Minutes")+
+  geom_line()+
+  geom_point()+
+  geom_errorbar(aes(ymin=Mean-SD,ymax=Mean+SD),width=.1)
+
+# race times have increased in the 20s group since 1999
+
+```
+
+```{r ANOVA by 30s}
+cb_race30s <- subset(cb_race, cb_race$AgeGroup=="30s")
+
+# For those women in their 20s did their avg time vary across the years
+res.aov3 <- aov(TotalTimeMin ~ Year, data = cb_race30s)
+# Summary of the analysis
+summary(res.aov3)
+
+sumstats3<-aggregate(TotalTimeMin~Year*AgeGroup,data=cb_race30s,mysummary)
+sumstats3<-cbind(sumstats3[,1:2],sumstats3[,-(1:2)])
+sumstats3
+
+ggplot(sumstats3,aes(x=Year,y=Mean,group=AgeGroup,colour=AgeGroup))+
+  ggtitle("Age Variance of Women in their 30s over time") +
+  ylab("Total Time in Minutes")+
+  geom_line()+
+  geom_point()+
+  geom_errorbar(aes(ymin=Mean-SD,ymax=Mean+SD),width=.1)
+
+# race times have increased in the 30s group since 1999
+
+```
+
+```{r LOESS}
+#plot avg runtime by AgeGroup
+cb_race %>% group_by(Year = as.integer(Year)+1998, AgeGroup) %>% 
+  summarise(AvgRunTime = mean(TotalTimeMin)) %>%
+  ggplot() + aes(x = Year, y = AvgRunTime, colour = AgeGroup) + geom_smooth() +
+ scale_color_hue() + theme_bw() + scale_x_continuous(breaks=c(1999:2012))
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

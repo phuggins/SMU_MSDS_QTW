@@ -1,0 +1,464 @@
+---
+title: "CaseStudy2"
+author: "Dustin Bracy, Grace Lang, Paul Huggins, Branum Stephan"
+date: "1/14/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(magrittr)
+library(lattice)
+library(fields)
+library(mice)
+library(VIM)
+library(caret)
+library(class)
+library(kknn)
+
+#TODO: Add additional libraries here:
+
+setwd(dirname(getwd()))
+source(paste(getwd(), '/Unit2_CaseStudy/R/book_functions.R', sep=""))
+source(paste(getwd(), '/Unit2_CaseStudy/R/import.R', sep=""))
+source(paste(getwd(), '/Unit2_CaseStudy/R/helpers.R', sep=""))
+
+options(warn=-1)
+
+```
+
+```{r ETL}
+
+# Build combined dataframe:
+setwd(dirname(getwd()))
+all_data <- importData()
+numVars = c("time", "posX", "posY", "posZ", "orientation")
+
+# apply the variable names
+all_data[ numVars ] =  lapply(all_data[ numVars ], as.numeric)
+rm(numVars)
+
+# round orientations
+all_data$angle = roundOrientation(all_data$orientation)
+
+# update time values
+all_data$time = all_data$time/1000
+class(all_data$time) = c("POSIXt", "POSIXct")
+```
+
+```{r Nulls}
+# Identify Nulls:
+sapply(all_data, function(x) sum(is.na(x)))
+#which mac addresses have the most nulls
+plotNAs(all_data)
+#count of NAs in online/offline
+#p <- ggplot(data = all_data, aes(x=set, y=nas))+geom_bar(stat="identity") 
+#p2 <- p+scale_fill_brewer(palette="Paired") + theme_minimal()
+#p2
+
+
+# Handle Nulls:
+
+### Option 1: drop nulls
+# all_data = all_data[ !sapply(all_data, is.null) ]
+
+### Option 2: Impute nulls
+na_count <- data.frame(sapply(all_data, function(y) sum(length(which(is.na(y))))))
+na_perc <- data.frame(100 * colMeans(is.na(all_data)))
+mice_plot <- aggr(all_data, col=c('navyblue','yellow'),
+                    numbers=TRUE, sortVars=TRUE,
+                    labels=names(all_data), cex.axis=0.5,
+                    gap=1, ylab=c("Missing data","Pattern"))
+
+# setup mice
+impute_df <- data.frame(all_data)
+to_impute <- impute_df %>% select(!"time")  # drop time column since we don't need to impute it and it is string
+time <- impute_df["time"] # extract time column to merge later
+
+# impute
+imputation <- mice(to_impute, method='pmm', 
+                            maxit=2,
+                            m = 2,
+                            seed=123)
+
+# re-combine back with time
+imputed_comp <- complete(imputation,2)
+all_data <- cbind(time, imputed_comp)
+
+# verify all nulls have imputed
+na_perc <- data.frame(100 * colMeans(is.na(all_data)))
+mice_plot <- aggr(all_data, col=c('navyblue','yellow'),
+                    numbers=TRUE, sortVars=TRUE,
+                    labels=names(all_data), cex.axis=0.5,
+                    gap=1, ylab=c("Missing data","Pattern"))
+all_data <- all_data %>% select(!"nas")
+```
+
+```{r Summarize}
+
+# Get summary data by mean 
+
+
+summary_data <- all_data %>% 
+  group_by(set, posXY) %>% 
+  summarise(
+    X00.0f.a3.39.e1.c0 = mean(X00.0f.a3.39.e1.c0),
+    X00.0f.a3.39.dd.cd = mean(X00.0f.a3.39.dd.cd),
+    X00.14.bf.b1.97.8a = mean(X00.14.bf.b1.97.8a),
+    X00.14.bf.3b.c7.c6 = mean(X00.14.bf.3b.c7.c6),
+    X00.14.bf.b1.97.90 = mean(X00.14.bf.b1.97.90),
+    X00.14.bf.b1.97.8d = mean(X00.14.bf.b1.97.8d),
+    X00.14.bf.b1.97.81 = mean(X00.14.bf.b1.97.81)
+  )
+
+summary_data_median <- all_data %>% 
+  group_by(set, posXY) %>% 
+  summarise(
+    X00.0f.a3.39.e1.c0 = median(X00.0f.a3.39.e1.c0),
+    X00.0f.a3.39.dd.cd = median(X00.0f.a3.39.dd.cd),
+    X00.14.bf.b1.97.8a = median(X00.14.bf.b1.97.8a),
+    X00.14.bf.3b.c7.c6 = median(X00.14.bf.3b.c7.c6),
+    X00.14.bf.b1.97.90 = median(X00.14.bf.b1.97.90),
+    X00.14.bf.b1.97.8d = median(X00.14.bf.b1.97.8d),
+    X00.14.bf.b1.97.81 = median(X00.14.bf.b1.97.81)
+  )
+
+
+```
+
+
+
+
+```{r Macs}
+# MAC Selection:
+### Option 1: text drops (comment out scenario 2)
+all_data = all_data %>% select(!"X00.0f.a3.39.dd.cd") 
+
+### Option 2: text keeps (comment out scenario 1 )
+# all_data = all_data %>% select(!"X00.0f.a3.39.e1.c0")
+
+### Option 3: use all of them (comment out scenario 1 + 2)
+
+# output datasets:
+offline <- data.frame(all_data) %>% filter(all_data$set == 'offline')
+online <- data.frame(all_data) %>% filter(all_data$set == 'online')
+```
+
+
+```{r EDA}
+# Create a plot of the orientation
+plot(ecdf(offline$orientation), pch = 19, cex = 0.3,
+     xlim = c(-5, 365), axes = FALSE,
+     xlab = "orientation", ylab = "Empirical CDF", main = "")
+box()
+axis(2)
+axis(side = 1, at = seq(0, 360, by = 45))
+
+# create a density plot of the orientations
+plot(density(offline$orientation, bw = 2), 
+     xlab = "orientation", main = "")
+
+# plot of rounded angles
+with(offline, boxplot(orientation ~ angle,
+                      xlab = "nearest 45 degree angle",
+                      ylab = "orientation"))
+
+summary(offline)
+#Min Date = 2/11/2006; Max Date = 3/9/2006
+#posX range 0 - 33
+#posY range 0 - 13
+#posZ has straight 0's, so dropped variable in order to cleanup dataset
+#dropped the channel field because data was not applicable
+
+#Linksys device begin with 00:14:bf
+#Alpha Netwirk device begins with 00:0f:a3
+#Lancom device begins with 00:a0:57; which none of the devices begin with this. documentation error
+
+#topography fig 1.10 
+summary(online)
+#Min Date = 2/11/2006; Max Date = 3/9/2006
+#posX range 0 - 32.54
+#posY range 0 - 12.19
+#posZ has straight 0's, so dropped variable in order to cleanup dataset
+#dropped the channel field because data was not applicable
+
+#how many nulls offline has compared to online data
+
+
+
+```
+
+
+```{r KNN-Setup}
+
+# scale signals 0-1 to improve KNN performance
+summary_data[,3:9] <- data.frame(apply(summary_data[,3:9], MARGIN = 2, FUN = function(X) (X - min(X))/diff(range(X))))
+
+# output datasets:
+offlineSummary <- data.frame(summary_data) %>% filter(summary_data$set == 'offline')
+onlineSummary <- data.frame(summary_data) %>% filter(summary_data$set == 'online')
+#offlineSummary <- data.frame(summary_data_median) %>% filter(summary_data_median$set == 'offline')
+#onlineSummary <- data.frame(summary_data_median) %>% filter(summary_data_median$set == 'online')
+
+
+# MAC Selection:
+### Option 1: text drops (comment out X00.0f.a3.39.dd.cd) 
+### Option 2: text keeps (comment out X00.0f.a3.39.e1.c0)
+### Option 3: use all of them (don't comment out any)
+##### Run both KNN chunks after making selection!!!
+
+macs <- c(
+   # 'X00.0f.a3.39.e1.c0', #text keeps
+    'X00.0f.a3.39.dd.cd', #text drops
+    'X00.14.bf.b1.97.8a',
+    'X00.14.bf.3b.c7.c6',
+    'X00.14.bf.b1.97.90',
+    'X00.14.bf.b1.97.8d',
+    'X00.14.bf.b1.97.81'
+)
+
+f = as.factor(train$posXY)~
+#  X00.0f.a3.39.e1.c0 + #text keeps
+  X00.0f.a3.39.dd.cd + #text drops
+  X00.14.bf.b1.97.8a +
+  X00.14.bf.3b.c7.c6 +
+  X00.14.bf.b1.97.90 +
+  X00.14.bf.b1.97.8d +
+  X00.14.bf.b1.97.81 
+    
+
+iterations = 1000
+#set.seed(7)
+splitPerc = .8
+numks = round(sqrt(dim(offlineSummary)[1]))
+
+# CREATING LIST OF MAC VARIATIONS FOR FILTERING MODEL TYPES
+mac_variation_1 <- c(
+   # 'X00.0f.a3.39.e1.c0', #text keeps
+    'X00.0f.a3.39.dd.cd', #text drops
+    'X00.14.bf.b1.97.8a',
+    'X00.14.bf.3b.c7.c6',
+    'X00.14.bf.b1.97.90',
+    'X00.14.bf.b1.97.8d',
+    'X00.14.bf.b1.97.81'
+)
+
+mac_variation_2 <- c(
+    'X00.0f.a3.39.e1.c0', #text keeps
+    #'X00.0f.a3.39.dd.cd', #text drops
+    'X00.14.bf.b1.97.8a',
+    'X00.14.bf.3b.c7.c6',
+    'X00.14.bf.b1.97.90',
+    'X00.14.bf.b1.97.8d',
+    'X00.14.bf.b1.97.81'
+)
+
+mac_variation_3 <- c(
+    'X00.0f.a3.39.e1.c0', #text keeps
+    'X00.0f.a3.39.dd.cd', #text drops
+    'X00.14.bf.b1.97.8a',
+    'X00.14.bf.3b.c7.c6',
+    'X00.14.bf.b1.97.90',
+    'X00.14.bf.b1.97.8d',
+    'X00.14.bf.b1.97.81'
+)
+
+mac_variations <- list(mac_variation_1, mac_variation_2, mac_variation_3)
+```
+
+
+```{r base_KNN}
+
+base_knn <- function(mac_address_list){
+  masterMAE = matrix(nrow = iterations, ncol = numks)
+  # create range for number of resamples
+  for(j in 1:iterations) {
+    # resample data
+    trainIndices = sample(1:dim(offlineSummary)[1],round(splitPerc * dim(offlineSummary)[1]))
+    train = offlineSummary[trainIndices,]
+    test = offlineSummary[-trainIndices,]
+    test_array <- sapply(test$posXY, function(x) as.numeric(strsplit(x,'-')[[1]]))
+    
+    # create range of k values
+    for(i in 3:numks) {
+      if (i %% 2 == 0) {
+        next
+      }
+      
+      # predict using i-th value of k
+      classifications = knn(train[,mac_address_list],test[,mac_address_list],as.factor(train$posXY), prob = F, k = i)
+      preds <- as.vector(classifications)
+      pred_array <- sapply(preds, function(x) as.numeric(strsplit(x,'-')[[1]]) )
+      masterMAE[j,i] = MAE(pred_array,test_array)
+    }
+  }
+  
+  meanError <- colMeans(masterMAE)
+  meanError
+  
+  plot(seq(1,numks), meanError, main="K value determination", xlab="Value of K")
+  best_k <- which.min(meanError)
+  return(masterMAE)
+}
+
+#ALL Macs: Best K = 3, MAE = 1.053 / using median: 1.109
+#Text Keep: Best K = 3, MAE = 1.109 / using median: 1.176
+#Text Drop: Best K = 3, MAE = 1.036 / using median: 1.138
+```
+
+
+
+```{r KNN-Caret, eval=FALSE}
+#set.seed(123)
+#knn.data <- all_data %>% select(!"time")
+#knn.data <- knn.data %>% select(!"nas")
+#y <- knn.data$posXY
+
+# Split the data into training and test set
+#intrain <- createDataPartition(y, p= 0.7, list = FALSE)
+#training <- knn.data[intrain,]
+#testing <- knn.data[-intrain,]
+#dim(training); dim(testing)
+
+# Fit the model on the training set
+#trctlr <- trainControl(method = "repeatedcv", number = 5, repeats = 3)
+#knn.caret <- train(posXY ~ ., data = training, method = "knn",
+#                   trControl = trctlr,
+#                   preProcess = c("center", "scale"),
+#                   tuneLength = 10)
+# Plot model accuracy vs different values of k
+#plot(knn.caret)
+
+# training summary
+#knn.caret
+
+# predict
+#knn.pred <- predict(knn.caret, newdata = testing)
+#knn.pred
+
+# confusion matrix &  metrics
+#confusionMatrix(knn.pred, testing$posXY)
+```
+
+```{r KNN-Weighted}
+
+weighted_knn <- function(mac_address_list){
+masterMAE_weighted = matrix(nrow = iterations, ncol = numks)
+mac_address_list[length(mac_address_list) + 1] = "posXY"
+for(j in 1:iterations) {
+  # resample data
+  trainIndices = sample(1:dim(offlineSummary)[1],round(splitPerc * dim(offlineSummary)[1]))
+  train = offlineSummary[trainIndices,]
+  test = offlineSummary[-trainIndices,]
+  test_array <- sapply(test$posXY, function(x) as.numeric(strsplit(x,'-')[[1]]))
+  #offlineSummary$posXY = as.factor(offlineSummary$posXY)
+  train = train[,mac_address_list]
+  test = test[,mac_address_list]
+
+
+  for(i in 3:numks) {
+    if (i %% 2 == 0) {
+      next
+    }
+
+    # predict using i-th value of k
+    classifications = kknn(as.factor(train$posXY) ~ ., 
+                           train,
+                           test,
+                           as.factor(train$posXY),
+                           k = i,
+                           kernel = "optimal"
+                           )
+
+    preds <- classifications$CL[,i]
+    pred_array <- sapply(preds, function(x) as.numeric(strsplit(x,'-')[[1]]) )
+    masterMAE_weighted[j,i] = MAE(pred_array,test_array)
+  }
+}
+
+meanError_weighted <- colMeans(masterMAE_weighted)
+meanError_weighted
+
+plot(seq(1,numks), meanError_weighted, main="K value determination", xlab="Value of K")
+best_k_weighted <- which.min(meanError_weighted)
+return(masterMAE_weighted)
+}
+#ALL Macs: Best K = 3, MAE = 1.2245 / using median: 1.282
+#Text Keep: Best K = 3, MAE = 1.2503 / using median: 1.289
+#Text Drop: Best K = 3, MAE = 1.1482 / using median: 1.203
+
+
+```
+
+
+```{r Performance Eval}
+# plot to compare MAE across all variations in data
+
+# base models (regular knn)
+base_knn_model_1 <- data.frame(base_knn(mac_variations[[1]]))
+base_knn_model_1$case = 'classic knn, * + cd'
+
+base_knn_model_2 <- data.frame(base_knn(mac_variations[[2]]))
+base_knn_model_2$case = 'classic knn, * + c0'
+
+base_knn_model_3 <- data.frame(base_knn(mac_variations[[3]]))
+base_knn_model_3$case = 'classic knn, * + cd + c0'
+
+
+# weighted knn models
+weighted_knn_model_1 <- data.frame(weighted_knn(mac_variations[[1]]))
+weighted_knn_model_1$case = 'weighted knn, * + cd'
+
+weighted_knn_model_2 <- data.frame(weighted_knn(mac_variations[[2]]))
+weighted_knn_model_2$case = 'weighted knn, * + c0'
+
+weighted_knn_model_3 <- data.frame(weighted_knn(mac_variations[[3]]))
+weighted_knn_model_3$case = 'weighted knn, * + cd + c0'
+
+output <- rbind(base_knn_model_1, base_knn_model_2, base_knn_model_3,
+                weighted_knn_model_1, weighted_knn_model_2, weighted_knn_model_3)
+
+analysis_df <- reshape::melt(output %>% select_if(function(x) !(all(is.na(x)))), id="case")
+
+p <- analysis_df %>% group_by(case, variable) %>% summarize(output=mean(value)) %>% mutate(x=as.integer(substring(variable, 2, ))) %>% ggplot(aes(x=reorder(x, as.integer(x)), y=output, color=case, group=case)) + geom_point() + geom_line() + xlab("Neighbors") + ylab("MAE") + labs(color="Model") + ggtitle("MAE vs. Neighbors (k-value) by Model Type")
+```
+
+```{r Predictions}
+## Prediction performance on online dataset using base KNN:
+classifications = knn(offlineSummary[,macs],onlineSummary[,macs],as.factor(offlineSummary$posXY), prob = F, k = 3)
+preds <- as.vector(classifications)
+pred_array <- sapply(preds, function(x) as.numeric(strsplit(x,'-')[[1]]) )
+test_array <- sapply(onlineSummary$posXY, function(x) as.numeric(strsplit(x,'-')[[1]]))
+
+MAE(pred_array,test_array) #1.26925 / median: 1.508
+
+
+
+## Prediction performance on online dataset using weighted KNN:
+classifications = kknn(
+  as.factor(offlineSummary$posXY)~
+     # X00.0f.a3.39.e1.c0 + #text keeps
+      X00.0f.a3.39.dd.cd + #text drops
+      X00.14.bf.b1.97.8a +
+      X00.14.bf.3b.c7.c6 +
+      X00.14.bf.b1.97.90 +
+      X00.14.bf.b1.97.8d +
+      X00.14.bf.b1.97.81, 
+   offlineSummary[,macs],
+   onlineSummary[,macs],
+   as.factor(offlineSummary$posXY),
+   k = 3,
+   kernel = "optimal"
+   )
+preds <- classifications$CL[,3]
+pred_array <- sapply(preds, function(x) as.numeric(strsplit(x,'-')[[1]]) )
+test_array <- sapply(onlineSummary$posXY, function(x) as.numeric(strsplit(x,'-')[[1]]))
+
+MAE(pred_array,test_array) #1.495583 / median: 1.502
+
+
+```
+
+
